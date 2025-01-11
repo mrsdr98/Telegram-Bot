@@ -55,6 +55,3 @@ A robust Telegram bot built with Python that allows admins to manage and automat
 git clone https://github.com/mrsdr98/telegram-bot.git
 cd telegram-bot
 
-```bash
-chmod +x setup.sh
-sudo ./setup.sh
