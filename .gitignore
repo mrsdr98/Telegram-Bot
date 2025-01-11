@@ -1,0 +1,26 @@
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv/
+env.bak/
+venv.bak/
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+
+# Configuration Files
+config.json
+.env
+
+# Result Files
+telegram_results_*.csv
+registered_users_*.json
+
+# System Files
+.DS_Store
+Thumbs.db
