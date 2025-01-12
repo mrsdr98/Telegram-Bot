@@ -42,6 +42,9 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
 # Webhook URL set to https://yourdomain.com/{BOT_TOKEN}
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", f"https://yourdomain.com/{BOT_TOKEN}")
 
+# Flag to determine whether to use webhook or polling
+USE_WEBHOOK = os.getenv("USE_WEBHOOK", "False").lower() == "true"
+
 # List of Admin Telegram User IDs (JSON Array)
 try:
     ADMINS = json.loads(os.getenv("ADMINS", "[123456789, 987654321]"))  # Replace with actual admin user IDs
@@ -189,7 +192,7 @@ class TelegramChecker:
             logger.error(f"Error reading CSV file {file_path}: {e}")
         return phone_numbers
 
-    def check_telegram_status(self, phone_numbers: List[str]) -> List[Dict[str, Any]]:
+    async def check_telegram_status(self, phone_numbers: List[str]) -> List[Dict[str, Any]]:
         """
         Check if phone numbers are registered on Telegram.
 
@@ -208,12 +211,32 @@ class TelegramChecker:
                 "proxyConfiguration": self.proxy_config
             }
             try:
-                run = self.client.actor("wilcode/telegram-phone-number-checker").call(run_input=run_input)
-                dataset_id = run["defaultDatasetId"]
-                dataset = self.client.dataset(dataset_id)
-                for item in dataset.iterate_items():
-                    results.append(item)
-                logger.info(f"Batch {i//10 + 1} processed successfully.")
+                run = await self.client.actor("wilcode/telegram-phone-number-checker").call(run_input=run_input)
+                run_id = run["id"]
+                logger.info(f"Actor run started with run_id: {run_id}")
+                
+                # Wait for the actor run to finish
+                run_finished = False
+                while not run_finished:
+                    run_info = await self.client.run(run_id).get()
+                    status = run_info.get('status')
+                    logger.info(f"Actor run status: {status}")
+                    if status == 'SUCCEEDED':
+                        run_finished = True
+                    elif status in ['FAILED', 'TIMED_OUT', 'CANCELED']:
+                        logger.error(f"Actor run failed with status: {status}")
+                        break
+                    else:
+                        await asyncio.sleep(10)  # Wait before checking again
+
+                if run_finished:
+                    dataset_id = run_info["defaultDatasetId"]
+                    dataset = self.client.dataset(dataset_id)
+                    async for item in dataset.iterate_items():
+                        results.append(item)
+                    logger.info(f"Batch {i//10 + 1} processed successfully.")
+                else:
+                    logger.error(f"Actor run for batch {batch} did not complete successfully.")
             except Exception as e:
                 logger.error(f"Error processing batch {batch}: {e}")
         logger.info(f"Total results obtained: {len(results)}")
@@ -518,6 +541,9 @@ class TelegramBot:
 
         # -------- Message Handlers --------
         self.application.add_handler(MessageHandler(filters.Document.ALL, self.upload_csv_handler))
+
+        # Register the general text message handler (if needed)
+        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_messages))
 
         # -------- Error Handler --------
         self.application.add_error_handler(self.error_handler)
@@ -990,7 +1016,7 @@ class TelegramBot:
                     return
 
                 # Check Telegram status using Apify
-                results = self.checker.check_telegram_status(phone_numbers)
+                results = await self.checker.check_telegram_status(phone_numbers)
 
                 # Save results in session
                 session = get_session(user_id)
@@ -1387,22 +1413,26 @@ class TelegramBot:
 
     async def run(self):
         """
-        Start the bot and set the webhook.
+        Start the bot using polling or webhook based on configuration.
         """
         try:
             # Start the application
             await self.application.initialize()
             await self.application.start()
 
-            # Run the webhook
-            await self.application.run_webhook(
-                listen=self.host,
-                port=self.port,
-                url_path=self.bot_token,
-                webhook_url=self.webhook_url
-            )
-
-            logger.info("Bot is running and listening for updates.")
+            if USE_WEBHOOK:
+                # Run the webhook
+                await self.application.run_webhook(
+                    listen=self.host,
+                    port=self.port,
+                    url_path=self.bot_token,
+                    webhook_url=self.webhook_url
+                )
+                logger.info("Bot is running with webhook and listening for updates.")
+            else:
+                # Run polling
+                await self.application.run_polling()
+                logger.info("Bot is running with polling and listening for updates.")
         except Exception as e:
             logger.error(f"Failed to start the bot: {e}")
         finally:
