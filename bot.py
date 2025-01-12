@@ -542,7 +542,7 @@ class TelegramBot:
             },
             fallbacks=[CommandHandler("cancel", self.cancel)],
             allow_reentry=True,
-            per_message=True  # Set per_message=True to eliminate PTBUserWarning
+            per_message=False  # Set per_message=False to allow both CallbackQueryHandler and MessageHandler
         )
         self.application.add_handler(conv_handler_generate_ss)
 
@@ -554,7 +554,7 @@ class TelegramBot:
             },
             fallbacks=[CommandHandler("cancel", self.cancel)],
             allow_reentry=True,
-            per_message=True  # Set per_message=True to eliminate PTBUserWarning
+            per_message=False  # Set per_message=False to allow both CallbackQueryHandler and MessageHandler
         )
         self.application.add_handler(conv_handler_set_apify)
 
@@ -566,7 +566,7 @@ class TelegramBot:
             },
             fallbacks=[CommandHandler("cancel", self.cancel)],
             allow_reentry=True,
-            per_message=True  # Set per_message=True to eliminate PTBUserWarning
+            per_message=False  # Set per_message=False to allow both CallbackQueryHandler and MessageHandler
         )
         self.application.add_handler(conv_handler_set_channel)
 
@@ -578,7 +578,7 @@ class TelegramBot:
             },
             fallbacks=[CommandHandler("cancel", self.cancel)],
             allow_reentry=True,
-            per_message=True  # Set per_message=True to eliminate PTBUserWarning
+            per_message=False  # Set per_message=False to allow both CallbackQueryHandler and MessageHandler
         )
         self.application.add_handler(conv_handler_block_user)
 
@@ -1121,8 +1121,8 @@ class TelegramBot:
 
                 # Clean up temporary files asynchronously
                 try:
-                    await loop.run_in_executor(self.executor, temp_file_path.unlink, True)
-                    await loop.run_in_executor(self.executor, result_file.unlink, True)
+                    await loop.run_in_executor(self.executor, temp_file_path.unlink)
+                    await loop.run_in_executor(self.executor, result_file.unlink)
                     if not any(temp_dir.iterdir()):
                         await loop.run_in_executor(self.executor, temp_dir.rmdir)
                 except Exception as e:
@@ -1410,7 +1410,7 @@ class TelegramBot:
 
         # Clean up the exported file asynchronously
         try:
-            await loop.run_in_executor(self.executor, output_file.unlink, True)
+            await loop.run_in_executor(self.executor, output_file.unlink)
         except Exception as e:
             logger.warning(f"Failed to delete exported file {output_file}: {e}")
 
