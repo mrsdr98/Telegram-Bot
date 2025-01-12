@@ -68,14 +68,24 @@ if os.path.exists(CONFIG_FILE):
             logger.error("config.json is corrupted. Resetting configurations.")
             config = {
                 "blocked_users": [],
-                "user_sessions": {}
+                "user_sessions": {},
+                "telegram_api_id": None,
+                "telegram_api_hash": None,
+                "telegram_string_session": None,
+                "target_channel_username": None,
+                "apify_api_token": None
             }
             with open(CONFIG_FILE, 'w', encoding='utf-8') as fw:
                 json.dump(config, fw, indent=4, ensure_ascii=False)
 else:
     config = {
         "blocked_users": [],
-        "user_sessions": {}
+        "user_sessions": {},
+        "telegram_api_id": None,
+        "telegram_api_hash": None,
+        "telegram_string_session": None,
+        "target_channel_username": None,
+        "apify_api_token": None
     }
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=4, ensure_ascii=False)
@@ -670,12 +680,17 @@ class TelegramBot:
                 return
 
             try:
+                # Define a temporary path to save the file
+                temp_dir = Path("temp")
+                temp_dir.mkdir(exist_ok=True)
+                temp_file_path = temp_dir / f"{user_id}_{file.file_name}"
+
                 # Download the file
-                file_path = await file.get_file().download()
+                await file.get_file().download_to_drive(custom_path=str(temp_file_path))
                 await update.message.reply_text("🔄 در حال پردازش فایل CSV شما. لطفاً صبر کنید...")
 
                 # Read phone numbers from CSV
-                phone_numbers = self.checker.read_csv(file_path)
+                phone_numbers = self.checker.read_csv(str(temp_file_path))
                 if not phone_numbers:
                     await update.message.reply_text("❌ فایل CSV خالی یا نامعتبر است.")
                     return
@@ -710,6 +725,15 @@ class TelegramBot:
                     filename=result_file.name,
                     caption="📁 این نتایج بررسی شماره تلفن‌های شما است."
                 )
+
+                # Clean up temporary files
+                try:
+                    temp_file_path.unlink(missing_ok=True)
+                    result_file.unlink(missing_ok=True)
+                    temp_dir.rmdir()
+                except Exception as e:
+                    logger.warning(f"Failed to clean up temporary files: {e}")
+
             except Exception as e:
                 logger.error(f"Error processing CSV: {e}")
                 await update.message.reply_text("❌ هنگام پردازش فایل CSV خطایی رخ داد.")
@@ -970,6 +994,12 @@ class TelegramBot:
             caption="📁 لیست کاربران ثبت‌شده"
         )
 
+        # Clean up the exported file
+        try:
+            output_file.unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning(f"Failed to delete exported file {output_file}: {e}")
+
     async def list_user_ids(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
         List all user IDs processed.
@@ -1009,14 +1039,15 @@ class TelegramBot:
             await update.message.reply_text("❌ شما اجازه استفاده از این ربات را ندارید.")
             return
 
+        setting = context.user_data.get('setting')
         state = context.user_data.get('state')
         text = update.message.text.strip()
 
-        if state == 'awaiting_block_user_id':
-            await self.block_user_input_handler(update, context)
-
-        elif state in ['set_api_id', 'set_api_hash', 'set_string_session', 'set_apify_token', 'set_channel_username']:
+        if setting:
             await self.handle_settings_input(update, context, text)
+
+        elif state == 'awaiting_block_user_id':
+            await self.block_user_input_handler(update, context)
 
         else:
             await update.message.reply_text(
@@ -1135,18 +1166,13 @@ class TelegramBot:
         ]
         return keyboard
 
-    async def run(self):
+    def run(self):
         """
-        Start the bot and set the webhook.
+        Start the bot using polling.
         """
         try:
-            await self.application.initialize()
-            await self.application.set_webhook(url=self.webhook_url)
-            logger.info(f"Webhook set to {self.webhook_url}")
-            await self.application.start()
-            logger.info("Bot started successfully.")
-            await self.application.updater.start_polling()
-            await self.application.updater.idle()
+            logger.info("Starting the bot...")
+            self.application.run_polling()
         except Exception as e:
             logger.error(f"Failed to start the bot: {e}")
 
@@ -1154,16 +1180,7 @@ class TelegramBot:
     # Core Functionalities
     # ========================
 
-    async def add_to_channel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        Add verified users to the target channel.
-
-        Args:
-            update (Update): Telegram update.
-            context (ContextTypes.DEFAULT_TYPE): Context for the update.
-        """
-        # This method is already implemented above as `add_to_channel`
-        pass
+    # (The add_to_channel method is already implemented above)
 
     # ========================
     # Utility Functions
@@ -1175,7 +1192,7 @@ class TelegramBot:
     # Additional Handlers
     # ========================
 
-    # Ensure no duplicate method names
+    # (No additional handlers needed)
 
 # ========================
 # Running the Bot
@@ -1187,7 +1204,7 @@ def main():
     """
     # Initialize and run the bot
     bot = TelegramBot(BOT_TOKEN, webhook_url=WEBHOOK_URL)
-    asyncio.run(bot.run())
+    bot.run()
 
 if __name__ == "__main__":
     try:
