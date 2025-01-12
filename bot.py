@@ -966,21 +966,29 @@ class TelegramBot:
 
         try:
             await self.adder.connect()
-        except Exception as e:
+        except errors.RPCError as e:
             logger.error(f"Telethon connection error: {e}")
             await query.edit_message_text("❌ خطا در اتصال به Telegram. لطفاً بررسی کنید.")
+            return
+        except Exception as e:
+            logger.error(f"Unexpected error during Telethon connection: {e}")
+            await query.edit_message_text("❌ خطای غیرمنتظره رخ داد. لطفاً دوباره تلاش کنید.")
             return
 
         # Add users to channel
         try:
             summary = await self.adder.add_users_to_channel(user_ids, blocked_users)
+        except errors.FloodWaitError as e:
+            logger.warning(f"Flood wait error: {e}. Sleeping for {e.seconds} seconds.")
+            await asyncio.sleep(e.seconds)
+            await query.edit_message_text("❌ ربات در حال حاضر با محدودیت سرعت مواجه شده است. لطفاً بعداً دوباره تلاش کنید.")
+            return
         except Exception as e:
             logger.error(f"Error adding users to channel: {e}")
             await query.edit_message_text(f"❌ خطایی رخ داد: {e}")
-            await self.adder.disconnect()
             return
-
-        await self.adder.disconnect()
+        finally:
+            await self.adder.disconnect()
 
         # Prepare a summary message
         success_count = len(summary["added"])
@@ -1234,154 +1242,6 @@ class TelegramBot:
             "❓ لطفاً از دکمه‌های ارائه شده استفاده کنید یا یک دستور معتبر ارسال کنید."
         )
 
-    async def generate_ss_api_id(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        Handle Telegram API ID input during StringSession generation.
-
-        Args:
-            update (Update): Telegram update.
-            context (ContextTypes.DEFAULT_TYPE): Context for the update.
-        """
-        text = update.message.text.strip()
-        if not text.isdigit():
-            await update.message.reply_text("❌ لطفاً یک عدد معتبر برای Telegram API ID وارد کنید:")
-            return self.GENERATE_SS_API_ID
-
-        context.user_data['generate_ss_api_id'] = int(text)
-        await update.message.reply_text("2️⃣ لطفاً Telegram API Hash را وارد کنید:")
-        return self.GENERATE_SS_API_HASH
-
-    async def generate_ss_api_hash(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        Handle Telegram API Hash input during StringSession generation.
-
-        Args:
-            update (Update): Telegram update.
-            context (ContextTypes.DEFAULT_TYPE): Context for the update.
-        """
-        text = update.message.text.strip()
-        if not text:
-            await update.message.reply_text("❌ لطفاً یک Telegram API Hash معتبر وارد کنید:")
-            return self.GENERATE_SS_API_HASH
-
-        context.user_data['generate_ss_api_hash'] = text
-        await update.message.reply_text("3️⃣ لطفاً شماره تلفن را وارد کنید (با کد کشور، مثلاً +1234567890):")
-        return self.GENERATE_SS_PHONE
-
-    async def generate_ss_phone(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        Handle phone number input during StringSession generation.
-
-        Args:
-            update (Update): Telegram update.
-            context (ContextTypes.DEFAULT_TYPE): Context for the update.
-        """
-        text = update.message.text.strip()
-        if not text.startswith("+") or not text[1:].isdigit():
-            await update.message.reply_text("❌ لطفاً یک شماره تلفن معتبر با کد کشور وارد کنید (مثلاً +1234567890):")
-            return self.GENERATE_SS_PHONE
-
-        phone_number = text
-        context.user_data['generate_ss_phone'] = phone_number
-        await update.message.reply_text("🔄 در حال ارسال کد تایید به شماره تلفن شما...")
-        await update.message.reply_text("📩 لطفاً کدی که دریافت کردید را وارد کنید:")
-        return self.GENERATE_SS_CODE
-
-    async def generate_ss_code(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        Handle verification code input during StringSession generation.
-
-        Args:
-            update (Update): Telegram update.
-            context (ContextTypes.DEFAULT_TYPE): Context for the update.
-        """
-        code = update.message.text.strip()
-        phone_number = context.user_data.get('generate_ss_phone')
-        api_id = context.user_data.get('generate_ss_api_id')
-        api_hash = context.user_data.get('generate_ss_api_hash')
-
-        if not code:
-            await update.message.reply_text("❌ لطفاً کد تایید را وارد کنید:")
-            return self.GENERATE_SS_CODE
-
-        # Initialize Telethon client for this session
-        try:
-            telethon_client = TelegramClient(StringSession(), api_id, api_hash)
-            await telethon_client.connect()
-            if not await telethon_client.is_user_authorized():
-                await telethon_client.send_code_request(phone_number)
-        except Exception as e:
-            logger.error(f"Telethon connection error: {e}")
-            await update.message.reply_text("❌ خطا در اتصال به Telegram. لطفاً مجدداً تلاش کنید.")
-            return ConversationHandler.END
-
-        try:
-            await telethon_client.sign_in(phone=phone_number, code=code)
-        except errors.SessionPasswordNeededError:
-            await update.message.reply_text("🔐 احراز هویت دو مرحله‌ای فعال است. لطفاً رمز عبور خود را وارد کنید:")
-            return self.GENERATE_SS_PASSWORD
-        except errors.PhoneCodeInvalidError:
-            await update.message.reply_text("❌ کد تایید نامعتبر است. لطفاً دوباره تلاش کنید:")
-            return self.GENERATE_SS_CODE
-        except Exception as e:
-            logger.error(f"Telethon sign_in error: {e}")
-            await update.message.reply_text("❌ خطا در احراز هویت. لطفاً مجدداً تلاش کنید.")
-            await telethon_client.disconnect()
-            return ConversationHandler.END
-
-        # If sign_in is successful
-        string_session = telethon_client.session.save()
-        config["telegram_string_session"] = string_session
-        save_config()
-        await update.message.reply_text("✅ **String Session با موفقیت تولید و تنظیم شد!**")
-        await telethon_client.disconnect()
-        return ConversationHandler.END
-
-    async def generate_ss_password(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        Handle two-factor authentication password input during StringSession generation.
-
-        Args:
-            update (Update): Telegram update.
-            context (ContextTypes.DEFAULT_TYPE): Context for the update.
-        """
-        password = update.message.text.strip()
-        if not password:
-            await update.message.reply_text("❌ لطفاً رمز عبور را وارد کنید:")
-            return self.GENERATE_SS_PASSWORD
-
-        phone_number = context.user_data.get('generate_ss_phone')
-        api_id = context.user_data.get('generate_ss_api_id')
-        api_hash = context.user_data.get('generate_ss_api_hash')
-
-        try:
-            telethon_client = TelegramClient(StringSession(), api_id, api_hash)
-            await telethon_client.connect()
-            await telethon_client.sign_in(phone=phone_number, password=password)
-        except errors.PasswordHashInvalidError:
-            await update.message.reply_text("❌ رمز عبور نامعتبر است. لطفاً دوباره تلاش کنید:")
-            return self.GENERATE_SS_PASSWORD
-        except Exception as e:
-            logger.error(f"Telethon sign_in password error: {e}")
-            await update.message.reply_text("❌ خطا در احراز هویت. لطفاً مجدداً تلاش کنید.")
-            await telethon_client.disconnect()
-            return ConversationHandler.END
-
-        # If password sign_in is successful
-        string_session = telethon_client.session.save()
-        config["telegram_string_session"] = string_session
-        save_config()
-        await update.message.reply_text("✅ **String Session با موفقیت تولید و تنظیم شد!**")
-        await telethon_client.disconnect()
-        return ConversationHandler.END
-
-    async def handle_generate_string_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-        """
-        Placeholder for handling generate StringSession steps via ConversationHandler.
-        This is managed by individual step handlers.
-        """
-        pass  # Handled by specific handlers
-
     async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
         """
         Log the error and send a message to the user.
@@ -1421,24 +1281,24 @@ class TelegramBot:
         Start the bot and set the webhook.
         """
         try:
+            # Start the application
             await self.application.initialize()
             await self.application.start()
 
-            # Set up webhook
-            await self.application.set_webhook(url=self.webhook_url)
-            logger.info(f"Webhook set to {self.webhook_url}")
-
-            logger.info("Bot started successfully.")
-            await self.application.updater.start_webhook(
+            # Run the webhook
+            await self.application.run_webhook(
                 listen=self.host,
                 port=self.port,
                 url_path=self.bot_token,
                 webhook_url=self.webhook_url
             )
-            logger.info(f"Webhook listening on {self.host}:{self.port}")
-            await self.application.updater.idle()
+
+            logger.info("Bot is running and listening for updates.")
         except Exception as e:
             logger.error(f"Failed to start the bot: {e}")
+        finally:
+            await self.application.stop()
+            logger.info("Bot stopped.")
 
     # ========================
     # Core Functionalities
