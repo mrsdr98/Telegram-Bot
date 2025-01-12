@@ -3,9 +3,11 @@ import csv
 import json
 import os
 import logging
-import logging.handlers  # Added to ensure logging.handlers is available
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import List, Dict, Any
+import re
+import concurrent.futures
 
 from telethon import TelegramClient, errors, functions
 from telethon.sessions import StringSession
@@ -38,7 +40,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Telegram Bot Token obtained from BotFather
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("TELEGRAM_BOT_TOKEN is not set in the environment variables.")
 
 # Webhook URL set to https://yourdomain.com/{BOT_TOKEN}
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", f"https://yourdomain.com/{BOT_TOKEN}")
@@ -46,29 +50,48 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", f"https://yourdomain.com/{BOT_TOKEN}")
 # Flag to determine whether to use webhook or polling
 USE_WEBHOOK = os.getenv("USE_WEBHOOK", "False").lower() == "true"
 
-# List of Admin Telegram User IDs (JSON Array)
-try:
-    ADMINS = json.loads(os.getenv("ADMINS", "[123456789, 987654321]"))  # Replace with actual admin user IDs
-except json.JSONDecodeError:
+# List of Admin Telegram User IDs (Comma-Separated String)
+admins_env = os.getenv("ADMINS", "")
+if admins_env:
+    try:
+        ADMINS = [int(uid.strip()) for uid in admins_env.split(",") if uid.strip().isdigit()]
+    except ValueError:
+        ADMINS = []
+        logging.getLogger(__name__).error("ADMINS environment variable contains non-integer values. Using an empty admin list.")
+else:
     ADMINS = []
-    logging.error("ADMINS environment variable is not a valid JSON array. Using an empty admin list.")
+    logging.getLogger(__name__).warning("ADMINS environment variable is not set. Using an empty admin list.")
 
 # ==========================
-# End of Configuration
+# Logging Configuration
 # ==========================
+
+# Determine the directory where the script is located
+BASE_DIR = Path(__file__).resolve().parent
+
+# Ensure the logs directory exists
+LOG_DIR = BASE_DIR / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+
+# Define the log file path
+LOG_FILE = LOG_DIR / "bot.log"
 
 # Configure logging with rotation to prevent log file from growing indefinitely
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-handler = logging.handlers.RotatingFileHandler(
-    'bot.log', maxBytes=5*1024*1024, backupCount=2, encoding='utf-8'
+handler = RotatingFileHandler(
+    LOG_FILE, maxBytes=5*1024*1024, backupCount=2, encoding='utf-8'
 )
 formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
+# ==========================
+# End of Logging Configuration
+# ==========================
+
 # File to store blocked users and user sessions
-CONFIG_FILE = 'config.json'
+CONFIG_FILE = BASE_DIR / 'config.json'
 
 # Initialize or load configurations
 default_config = {
@@ -81,8 +104,8 @@ default_config = {
     "apify_api_token": None
 }
 
-if os.path.exists(CONFIG_FILE):
-    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+if CONFIG_FILE.exists():
+    with CONFIG_FILE.open('r', encoding='utf-8') as f:
         try:
             config = json.load(f)
             # Ensure all keys are present
@@ -92,11 +115,11 @@ if os.path.exists(CONFIG_FILE):
         except json.JSONDecodeError:
             logger.error("config.json is corrupted. Resetting configurations.")
             config = default_config.copy()
-            with open(CONFIG_FILE, 'w', encoding='utf-8') as fw:
+            with CONFIG_FILE.open('w', encoding='utf-8') as fw:
                 json.dump(config, fw, indent=4, ensure_ascii=False)
 else:
     config = default_config.copy()
-    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+    with CONFIG_FILE.open('w', encoding='utf-8') as f:
         json.dump(config, f, indent=4, ensure_ascii=False)
 
 # Helper functions to manage configurations
@@ -105,7 +128,7 @@ def save_config():
     Save the current configuration to config.json.
     """
     try:
-        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+        with CONFIG_FILE.open('w', encoding='utf-8') as f:
             json.dump(config, f, indent=4, ensure_ascii=False)
         logger.info("Configuration saved successfully.")
     except Exception as e:
@@ -335,6 +358,12 @@ class TelegramAdder:
         try:
             target_channel = await self.client.get_entity(self.target_channel_username)
             logger.info(f"Target channel {self.target_channel_username} retrieved.")
+        except ValueError:
+            logger.error(f"Target channel {self.target_channel_username} not found. Please verify the username.")
+            raise ValueError(f"Target channel {self.target_channel_username} not found. Please verify the username.")
+        except errors.ChatAdminRequiredError:
+            logger.error(f"Bot lacks admin permissions in the target channel {self.target_channel_username}.")
+            raise PermissionError(f"Bot lacks admin permissions in the target channel {self.target_channel_username}.")
         except Exception as e:
             logger.error(f"Failed to get target channel {self.target_channel_username}: {e}")
             raise ValueError(f"Failed to get target channel {self.target_channel_username}: {e}")
@@ -355,6 +384,7 @@ class TelegramAdder:
             except errors.FloodWaitError as e:
                 logger.warning(f"Flood wait error: {e}. Sleeping for {e.seconds} seconds.")
                 await asyncio.sleep(e.seconds)
+                summary["failed"].append(user_id)
                 continue
             except errors.UserPrivacyRestrictedError:
                 logger.warning(f"User {user_id} has privacy settings that prevent adding to channels.")
@@ -362,6 +392,10 @@ class TelegramAdder:
                 continue
             except errors.UserAlreadyParticipantError:
                 logger.info(f"User {user_id} is already a participant of the channel.")
+                summary["failed"].append(user_id)
+                continue
+            except errors.ChatWriteForbiddenError:
+                logger.error(f"Bot does not have permission to write in the target channel {self.target_channel_username}.")
                 summary["failed"].append(user_id)
                 continue
             except Exception as e:
@@ -420,6 +454,9 @@ class TelegramBot:
         # Initialize the Telegram bot application
         self.application = ApplicationBuilder().token(bot_token).build()
 
+        # Initialize ThreadPoolExecutor for asynchronous file operations
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
+
         # Register handlers
         self.register_handlers()
 
@@ -468,6 +505,7 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("start", self.start_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("cancel", self.cancel))
+        self.application.add_handler(CommandHandler("status", self.status_command))  # Added /status command
 
         # -------- CallbackQueryHandlers for Buttons --------
         # Define patterns for callbacks
@@ -503,7 +541,8 @@ class TelegramBot:
                 self.GENERATE_SS_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.generate_ss_password)],
             },
             fallbacks=[CommandHandler("cancel", self.cancel)],
-            allow_reentry=True
+            allow_reentry=True,
+            per_message=True  # Set per_message=True to eliminate PTBUserWarning
         )
         self.application.add_handler(conv_handler_generate_ss)
 
@@ -514,7 +553,8 @@ class TelegramBot:
                 self.SET_APIFY_TOKEN_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.set_apify_token)]
             },
             fallbacks=[CommandHandler("cancel", self.cancel)],
-            allow_reentry=True
+            allow_reentry=True,
+            per_message=True  # Set per_message=True to eliminate PTBUserWarning
         )
         self.application.add_handler(conv_handler_set_apify)
 
@@ -525,7 +565,8 @@ class TelegramBot:
                 self.SET_CHANNEL_USERNAME_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.set_channel_username)]
             },
             fallbacks=[CommandHandler("cancel", self.cancel)],
-            allow_reentry=True
+            allow_reentry=True,
+            per_message=True  # Set per_message=True to eliminate PTBUserWarning
         )
         self.application.add_handler(conv_handler_set_channel)
 
@@ -536,7 +577,8 @@ class TelegramBot:
                 self.BLOCK_USER_ID_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.block_user_input_handler)]
             },
             fallbacks=[CommandHandler("cancel", self.cancel)],
-            allow_reentry=True
+            allow_reentry=True,
+            per_message=True  # Set per_message=True to eliminate PTBUserWarning
         )
         self.application.add_handler(conv_handler_block_user)
 
@@ -587,7 +629,8 @@ class TelegramBot:
             "📄 **دستورات و گزینه‌ها:**\n\n"
             "/start - شروع ربات و نمایش گزینه‌ها\n"
             "/help - نمایش پیام راهنما\n"
-            "/cancel - لغو عملیات جاری\n\n"
+            "/cancel - لغو عملیات جاری\n"
+            "/status - نمایش وضعیت فعلی ربات\n\n"
             "**گزینه‌ها (از طریق دکمه‌ها):**\n"
             "• ⚙️ تنظیمات\n"
             "• 📂 آپلود مخاطبین CSV\n"
@@ -601,6 +644,30 @@ class TelegramBot:
             "- پس از آپلود CSV و پردازش، می‌توانید کاربران ثبت‌شده را به کانال هدف اضافه کنید."
         )
         await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+
+    async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        Handle the /status command to display current bot configurations.
+
+        Args:
+            update (Update): Telegram update.
+            context (ContextTypes.DEFAULT_TYPE): Context for the update.
+        """
+        user_id = update.effective_user.id
+        if not is_admin(user_id):
+            await update.message.reply_text("❌ شما اجازه استفاده از این ربات را ندارید.")
+            return
+
+        status_text = (
+            f"📊 **وضعیت ربات:**\n\n"
+            f"• **Apify API Token:** {'✅ تنظیم شده' if config.get('apify_api_token') else '❌ تنظیم نشده'}\n"
+            f"• **Telegram API ID:** {config.get('telegram_api_id') or '❌ تنظیم نشده'}\n"
+            f"• **Telegram API Hash:** {config.get('telegram_api_hash') or '❌ تنظیم نشده'}\n"
+            f"• **String Session:** {'✅ تنظیم شده' if config.get('telegram_string_session') else '❌ تنظیم نشده'}\n"
+            f"• **Target Channel Username:** {config.get('target_channel_username') or '❌ تنظیم نشده'}\n"
+            f"• **Blocked Users Count:** {len(config.get('blocked_users', []))}"
+        )
+        await update.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
 
     async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
@@ -682,8 +749,10 @@ class TelegramBot:
         elif data == "exit":
             await query.edit_message_text("❌ ربات با موفقیت متوقف شد.")
             await self.application.stop()
+            await self.application.shutdown()
+            logger.info("Bot has been stopped gracefully.")
 
-        elif data.startswith("unblock_user_"):
+        elif re.match(r"^unblock_user_\d+$", data):
             try:
                 target_user_id = int(data.split("_")[-1])
                 await self.unblock_user(update, context, target_user_id)
@@ -820,40 +889,33 @@ class TelegramBot:
             await update.message.reply_text("❌ لطفاً کد تایید را وارد کنید:")
             return self.GENERATE_SS_CODE
 
-        # Initialize Telethon client for this session
+        # Initialize Telethon client for this session using async with
         try:
-            telethon_client = TelegramClient(StringSession(), api_id, api_hash)
-            await telethon_client.connect()
-            if not await telethon_client.is_user_authorized():
-                await telethon_client.send_code_request(phone_number)
+            async with TelegramClient(StringSession(), api_id, api_hash) as telethon_client:
+                if not await telethon_client.is_user_authorized():
+                    await telethon_client.send_code_request(phone_number)
+                try:
+                    await telethon_client.sign_in(phone=phone_number, code=code)
+                except errors.SessionPasswordNeededError:
+                    await update.message.reply_text("🔐 احراز هویت دو مرحله‌ای فعال است. لطفاً رمز عبور خود را وارد کنید:")
+                    return self.GENERATE_SS_PASSWORD
+                except errors.PhoneCodeInvalidError:
+                    await update.message.reply_text("❌ کد تایید نامعتبر است. لطفاً دوباره تلاش کنید:")
+                    return self.GENERATE_SS_CODE
+
+                # If sign_in is successful
+                string_session = telethon_client.session.save()
+                config["telegram_string_session"] = string_session
+                save_config()
+                await update.message.reply_text("✅ **String Session با موفقیت تولید و تنظیم شد!**")
+                # Reinitialize TelegramAdder with new String Session
+                self.initialize_components()
+                return ConversationHandler.END
+
         except Exception as e:
             logger.error(f"Telethon connection error: {e}")
             await update.message.reply_text("❌ خطا در اتصال به Telegram. لطفاً مجدداً تلاش کنید.")
             return ConversationHandler.END
-
-        try:
-            await telethon_client.sign_in(phone=phone_number, code=code)
-        except errors.SessionPasswordNeededError:
-            await update.message.reply_text("🔐 احراز هویت دو مرحله‌ای فعال است. لطفاً رمز عبور خود را وارد کنید:")
-            return self.GENERATE_SS_PASSWORD
-        except errors.PhoneCodeInvalidError:
-            await update.message.reply_text("❌ کد تایید نامعتبر است. لطفاً دوباره تلاش کنید:")
-            return self.GENERATE_SS_CODE
-        except Exception as e:
-            logger.error(f"Telethon sign_in error: {e}")
-            await update.message.reply_text("❌ خطا در احراز هویت. لطفاً مجدداً تلاش کنید.")
-            await telethon_client.disconnect()
-            return ConversationHandler.END
-
-        # If sign_in is successful
-        string_session = telethon_client.session.save()
-        config["telegram_string_session"] = string_session
-        save_config()
-        await update.message.reply_text("✅ **String Session با موفقیت تولید و تنظیم شد!**")
-        await telethon_client.disconnect()
-        # Reinitialize TelegramAdder with new String Session
-        self.initialize_components()
-        return ConversationHandler.END
 
     async def generate_ss_password(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
@@ -873,27 +935,25 @@ class TelegramBot:
         api_hash = context.user_data.get('generate_ss_api_hash')
 
         try:
-            telethon_client = TelegramClient(StringSession(), api_id, api_hash)
-            await telethon_client.connect()
-            await telethon_client.sign_in(phone=phone_number, password=password)
+            async with TelegramClient(StringSession(), api_id, api_hash) as telethon_client:
+                await telethon_client.sign_in(phone=phone_number, password=password)
+
+                # If password sign_in is successful
+                string_session = telethon_client.session.save()
+                config["telegram_string_session"] = string_session
+                save_config()
+                await update.message.reply_text("✅ **String Session با موفقیت تولید و تنظیم شد!**")
+                # Reinitialize TelegramAdder with new String Session
+                self.initialize_components()
+                return ConversationHandler.END
+
         except errors.PasswordHashInvalidError:
             await update.message.reply_text("❌ رمز عبور نامعتبر است. لطفاً دوباره تلاش کنید:")
             return self.GENERATE_SS_PASSWORD
         except Exception as e:
             logger.error(f"Telethon sign_in password error: {e}")
             await update.message.reply_text("❌ خطا در احراز هویت. لطفاً مجدداً تلاش کنید.")
-            await telethon_client.disconnect()
-            return ConversationHandler.END
-
-        # If password sign_in is successful
-        string_session = telethon_client.session.save()
-        config["telegram_string_session"] = string_session
-        save_config()
-        await update.message.reply_text("✅ **String Session با موفقیت تولید و تنظیم شد!**")
-        await telethon_client.disconnect()
-        # Reinitialize TelegramAdder with new String Session
-        self.initialize_components()
-        return ConversationHandler.END
+            return self.GENERATE_SS_PASSWORD
 
     async def start_set_apify_token(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
@@ -968,8 +1028,10 @@ class TelegramBot:
             context (ContextTypes.DEFAULT_TYPE): Context for the update.
         """
         text = update.message.text.strip()
-        if not text.startswith("@"):
-            await update.message.reply_text("❌ لطفاً نام کاربری کانال را با @ شروع کنید (مثلاً @yourchannelusername):")
+        USERNAME_REGEX = re.compile(r'^@[\w]{5,32}$')  # Telegram usernames are between 5-32 characters and can include underscores
+
+        if not USERNAME_REGEX.match(text):
+            await update.message.reply_text("❌ لطفاً یک نام کاربری کانال معتبر وارد کنید (با @ شروع و بین 5 تا 32 کاراکتر):")
             return self.SET_CHANNEL_USERNAME_STATE  # Reuse the same state
 
         config["target_channel_username"] = text
@@ -1002,18 +1064,28 @@ class TelegramBot:
 
             try:
                 # Define a temporary path to save the file
-                temp_dir = Path("temp")
+                temp_dir = BASE_DIR / "temp"
                 temp_dir.mkdir(exist_ok=True)
                 temp_file_path = temp_dir / f"{user_id}_{file.file_name}"
 
-                # Download the file
+                # Download the file asynchronously
                 await file.get_file().download_to_drive(custom_path=str(temp_file_path))
                 await update.message.reply_text("🔄 در حال پردازش فایل CSV شما. لطفاً صبر کنید...")
 
-                # Read phone numbers from CSV
-                phone_numbers = self.checker.read_csv(str(temp_file_path))
+                # Read phone numbers from CSV asynchronously
+                loop = asyncio.get_running_loop()
+                if not self.checker:
+                    await update.message.reply_text("❌ Apify API Token تنظیم نشده است. لطفاً در تنظیمات آن را تنظیم کنید.")
+                    return
+
+                phone_numbers = await loop.run_in_executor(self.executor, self.checker.read_csv, str(temp_file_path))
                 if not phone_numbers:
                     await update.message.reply_text("❌ فایل CSV خالی یا نامعتبر است.")
+                    return
+
+                MAX_PHONE_NUMBERS = 1000  # Adjust as needed
+                if len(phone_numbers) > MAX_PHONE_NUMBERS:
+                    await update.message.reply_text(f"❌ تعداد شماره تلفن‌ها بیش از حد مجاز ({MAX_PHONE_NUMBERS}) است.")
                     return
 
                 # Check Telegram status using Apify
@@ -1024,9 +1096,9 @@ class TelegramBot:
                 session["results"] = results
                 set_session(user_id, session)
 
-                # Save results to CSV
-                result_file = Path(f"telegram_results_{user_id}.csv")
-                self.checker.save_results(results, str(result_file))
+                # Save results to CSV asynchronously
+                result_file = BASE_DIR / f"telegram_results_{user_id}.csv"
+                await loop.run_in_executor(self.executor, self.checker.save_results, results, str(result_file))
 
                 # Prepare a summary
                 total = len(results)
@@ -1047,12 +1119,12 @@ class TelegramBot:
                     caption="📁 این نتایج بررسی شماره تلفن‌های شما است."
                 )
 
-                # Clean up temporary files
+                # Clean up temporary files asynchronously
                 try:
-                    temp_file_path.unlink(missing_ok=True)
-                    result_file.unlink(missing_ok=True)
+                    await loop.run_in_executor(self.executor, temp_file_path.unlink, True)
+                    await loop.run_in_executor(self.executor, result_file.unlink, True)
                     if not any(temp_dir.iterdir()):
-                        temp_dir.rmdir()
+                        await loop.run_in_executor(self.executor, temp_dir.rmdir)
                 except Exception as e:
                     logger.warning(f"Failed to clean up temporary files: {e}")
 
@@ -1116,6 +1188,10 @@ class TelegramBot:
             logger.warning(f"Flood wait error: {e}. Sleeping for {e.seconds} seconds.")
             await asyncio.sleep(e.seconds)
             await query.edit_message_text("❌ ربات در حال حاضر با محدودیت سرعت مواجه شده است. لطفاً بعداً دوباره تلاش کنید.")
+            return
+        except PermissionError as e:
+            logger.error(f"Permission error: {e}")
+            await query.edit_message_text(f"❌ {e}")
             return
         except Exception as e:
             logger.error(f"Error adding users to channel: {e}")
@@ -1306,11 +1382,19 @@ class TelegramBot:
             await query.edit_message_text("❌ هیچ کاربر ثبت‌شده‌ای یافت نشد.")
             return
 
-        # Save to JSON
-        output_file = Path(f"registered_users_{user_id}.json")
+        # Save to JSON asynchronously
+        output_file = BASE_DIR / f"registered_users_{user_id}.json"
         try:
-            with open(output_file, "w", encoding="utf-8") as f:
-                json.dump(registered_users, f, indent=4, ensure_ascii=False)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                self.executor,
+                lambda: json.dump(
+                    registered_users,
+                    output_file.open("w", encoding="utf-8"),
+                    indent=4,
+                    ensure_ascii=False
+                )
+            )
             logger.info(f"Registered users exported to {output_file}.")
         except Exception as e:
             logger.error(f"Failed to export registered users: {e}")
@@ -1324,9 +1408,9 @@ class TelegramBot:
             caption="📁 لیست کاربران ثبت‌شده"
         )
 
-        # Clean up the exported file
+        # Clean up the exported file asynchronously
         try:
-            output_file.unlink(missing_ok=True)
+            await loop.run_in_executor(self.executor, output_file.unlink, True)
         except Exception as e:
             logger.warning(f"Failed to delete exported file {output_file}: {e}")
 
@@ -1417,19 +1501,21 @@ class TelegramBot:
         Start the bot using polling or webhook based on configuration.
         """
         try:
-            # Start the application
+            # Initialize the application
             await self.application.initialize()
+
+            # Start the application
             await self.application.start()
 
             if USE_WEBHOOK:
-                # Run the webhook
+                # Run the webhook on port 8443
                 await self.application.run_webhook(
                     listen=self.host,
                     port=self.port,
                     url_path=self.bot_token,
                     webhook_url=self.webhook_url
                 )
-                logger.info("Bot is running with webhook and listening for updates.")
+                logger.info(f"Bot is running with webhook on port {self.port} and listening for updates.")
             else:
                 # Run polling
                 await self.application.run_polling()
@@ -1437,8 +1523,13 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Failed to start the bot: {e}")
         finally:
-            await self.application.stop()
-            logger.info("Bot stopped.")
+            # Ensure that Application.stop() and shutdown() are awaited
+            try:
+                await self.application.stop()
+                await self.application.shutdown()
+                logger.info("Bot stopped.")
+            except Exception as e:
+                logger.error(f"Error while stopping the bot: {e}")
 
     # ========================
     # Core Functionalities
@@ -1467,7 +1558,7 @@ def main():
     Initialize and run the Telegram bot.
     """
     # Initialize and run the bot
-    bot = TelegramBot(BOT_TOKEN, webhook_url=WEBHOOK_URL)
+    bot = TelegramBot(BOT_TOKEN, webhook_url=WEBHOOK_URL, port=8443)
     asyncio.run(bot.run())
 
 if __name__ == "__main__":
