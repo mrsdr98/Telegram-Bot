@@ -458,11 +458,6 @@ class TelegramBot:
             r"^unblock_user_\d+$",
             "block_user_prompt",
             "back_to_main",
-            "set_api_id",
-            "set_api_hash",
-            "set_string_session",
-            "set_apify_token",
-            "set_channel_username",
             "export_registered_users",
             "list_user_ids"
         ]
@@ -671,31 +666,6 @@ class TelegramBot:
         elif data == "back_to_main":
             await self.start_command(update, context)
 
-        # Settings Submenu
-        elif data == "set_api_id":
-            await self.start_generate_string_session(update, context)
-
-        elif data == "set_api_hash":
-            # Start setting API Hash
-            await query.edit_message_text("🔧 لطفاً Telegram API Hash را وارد کنید:")
-            return
-
-        elif data == "set_string_session":
-            # Start setting String Session
-            await query.edit_message_text("🔧 لطفاً Telegram String Session را وارد کنید:")
-            context.user_data['setting'] = 'string_session'
-            return
-
-        elif data == "set_apify_token":
-            # Start setting Apify Token
-            await query.edit_message_text("🔧 لطفاً Apify API Token را وارد کنید:")
-            return  # Transition to Apify Token setting state
-
-        elif data == "set_channel_username":
-            # Start setting Channel Username
-            await query.edit_message_text("🔧 لطفاً نام کاربری کانال هدف را وارد کنید (با @ شروع کنید، مثلاً @yourchannelusername):")
-            return  # Transition to Channel Username setting state
-
         # Export Data Handlers
         elif data == "export_registered_users":
             await self.export_registered_users(update, context)
@@ -718,9 +688,7 @@ class TelegramBot:
         await query.answer()
 
         keyboard = [
-            [InlineKeyboardButton("🔧 تنظیم Telegram API ID", callback_data="set_api_id"),
-             InlineKeyboardButton("🔧 تنظیم Telegram API Hash", callback_data="set_api_hash")],
-            [InlineKeyboardButton("🔧 تنظیم Telegram String Session", callback_data="set_string_session"),
+            [InlineKeyboardButton("🔧 تولید String Session", callback_data="generate_string_session"),
              InlineKeyboardButton("🔧 تنظیم Apify API Token", callback_data="set_apify_token")],
             [InlineKeyboardButton("🔧 تنظیم Target Channel Username", callback_data="set_channel_username")],
             [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_main")],
