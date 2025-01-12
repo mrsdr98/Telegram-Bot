@@ -3,6 +3,7 @@ import csv
 import json
 import os
 import logging
+import logging.handlers  # Added to ensure logging.handlers is available
 from pathlib import Path
 from typing import List, Dict, Any
 
