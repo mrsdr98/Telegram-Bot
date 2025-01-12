@@ -42,7 +42,11 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", f"https://yourdomain.com/{BOT_TOKEN}")
 
 # List of Admin Telegram User IDs (JSON Array)
-ADMINS = json.loads(os.getenv("ADMINS", "[123456789, 987654321]"))  # Replace with actual admin user IDs
+try:
+    ADMINS = json.loads(os.getenv("ADMINS", "[123456789, 987654321]"))  # Replace with actual admin user IDs
+except json.JSONDecodeError:
+    ADMINS = []
+    logging.error("ADMINS environment variable is not a valid JSON array. Using an empty admin list.")
 
 # ==========================
 # End of Configuration
@@ -60,33 +64,31 @@ logger = logging.getLogger(__name__)
 CONFIG_FILE = 'config.json'
 
 # Initialize or load configurations
+default_config = {
+    "blocked_users": [],
+    "user_sessions": {},
+    "telegram_api_id": None,
+    "telegram_api_hash": None,
+    "telegram_string_session": None,
+    "target_channel_username": None,
+    "apify_api_token": None
+}
+
 if os.path.exists(CONFIG_FILE):
     with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
         try:
             config = json.load(f)
+            # Ensure all keys are present
+            for key, value in default_config.items():
+                if key not in config:
+                    config[key] = value
         except json.JSONDecodeError:
             logger.error("config.json is corrupted. Resetting configurations.")
-            config = {
-                "blocked_users": [],
-                "user_sessions": {},
-                "telegram_api_id": None,
-                "telegram_api_hash": None,
-                "telegram_string_session": None,
-                "target_channel_username": None,
-                "apify_api_token": None
-            }
+            config = default_config.copy()
             with open(CONFIG_FILE, 'w', encoding='utf-8') as fw:
                 json.dump(config, fw, indent=4, ensure_ascii=False)
 else:
-    config = {
-        "blocked_users": [],
-        "user_sessions": {},
-        "telegram_api_id": None,
-        "telegram_api_hash": None,
-        "telegram_string_session": None,
-        "target_channel_username": None,
-        "apify_api_token": None
-    }
+    config = default_config.copy()
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=4, ensure_ascii=False)
 
@@ -98,6 +100,7 @@ def save_config():
     try:
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(config, f, indent=4, ensure_ascii=False)
+        logger.info("Configuration saved successfully.")
     except Exception as e:
         logger.error(f"Failed to save config.json: {e}")
 
@@ -431,6 +434,7 @@ class TelegramBot:
             "manage_blocked",
             "export_data",
             "exit",
+            "generate_string_session",
             r"^unblock_user_\d+$",
             "block_user_prompt",
             "back_to_main",
@@ -589,6 +593,9 @@ class TelegramBot:
             await query.edit_message_text("❌ ربات با موفقیت متوقف شد.")
             await self.application.stop()
 
+        elif data == "generate_string_session":
+            await self.start_generate_string_session(update, context)
+
         elif data.startswith("unblock_user_"):
             try:
                 target_user_id = int(data.split("_")[-1])
@@ -650,6 +657,7 @@ class TelegramBot:
             [InlineKeyboardButton("🔧 تنظیم Telegram String Session", callback_data="set_string_session")],
             [InlineKeyboardButton("🔧 تنظیم Apify API Token", callback_data="set_apify_token")],
             [InlineKeyboardButton("🔧 تنظیم Target Channel Username", callback_data="set_channel_username")],
+            [InlineKeyboardButton("🔧 تولید و تنظیم String Session", callback_data="generate_string_session")],
             [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_main")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -659,6 +667,141 @@ class TelegramBot:
             "لطفاً یکی از تنظیمات زیر را انتخاب کنید تا مقدار آن را وارد یا به‌روزرسانی کنید:",
             reply_markup=reply_markup
         )
+
+    async def start_generate_string_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        Start the process to generate StringSession.
+
+        Args:
+            update (Update): Telegram update.
+            context (ContextTypes.DEFAULT_TYPE): Context for the update.
+        """
+        query = update.callback_query
+        await query.answer()
+        await query.edit_message_text(
+            "🔧 **تولید String Session**\n\n"
+            "لطفاً مراحل زیر را دنبال کنید تا String Session خود را تولید و تنظیم کنید.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        # Start by asking for API ID
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="1️⃣ لطفاً Telegram API ID را وارد کنید:"
+        )
+        context.user_data['generate_ss_step'] = 'api_id'
+
+    async def handle_generate_string_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+        """
+        Handle the steps for generating StringSession.
+
+        Args:
+            update (Update): Telegram update.
+            context (ContextTypes.DEFAULT_TYPE): Context for the update.
+            text (str): The input text from the user.
+        """
+        user_id = update.effective_user.id
+        step = context.user_data.get('generate_ss_step')
+
+        if step == 'api_id':
+            if not text.isdigit():
+                await update.message.reply_text("❌ لطفاً یک عدد معتبر برای Telegram API ID وارد کنید:")
+                return
+            context.user_data['api_id'] = int(text)
+            await update.message.reply_text("2️⃣ لطفاً Telegram API Hash را وارد کنید:")
+            context.user_data['generate_ss_step'] = 'api_hash'
+
+        elif step == 'api_hash':
+            if not text:
+                await update.message.reply_text("❌ لطفاً یک Telegram API Hash معتبر وارد کنید:")
+                return
+            context.user_data['api_hash'] = text
+            await update.message.reply_text("3️⃣ لطفاً شماره تلفن را وارد کنید (با کد کشور، مثلاً +1234567890):")
+            context.user_data['generate_ss_step'] = 'phone_number'
+
+        elif step == 'phone_number':
+            if not text.startswith("+") or not text[1:].isdigit():
+                await update.message.reply_text("❌ لطفاً یک شماره تلفن معتبر با کد کشور وارد کنید (مثلاً +1234567890):")
+                return
+            phone_number = text
+            context.user_data['phone_number'] = phone_number
+            await update.message.reply_text("🔄 در حال ارسال کد تایید به شماره تلفن شما...")
+            await update.message.reply_text("📩 لطفاً کدی که دریافت کردید را وارد کنید:")
+            context.user_data['generate_ss_step'] = 'code'
+
+            # Initialize Telethon client for this session
+            api_id = context.user_data['api_id']
+            api_hash = context.user_data['api_hash']
+            self.telethon_client = TelegramClient(StringSession(), api_id, api_hash)
+
+            try:
+                await self.telethon_client.connect()
+                if not await self.telethon_client.is_user_authorized():
+                    await self.telethon_client.send_code_request(phone_number)
+            except Exception as e:
+                logger.error(f"Telethon connection error: {e}")
+                await update.message.reply_text("❌ خطا در اتصال به Telegram. لطفاً مجدداً تلاش کنید.")
+                context.user_data['generate_ss_step'] = None
+                await self.telethon_client.disconnect()
+                return
+
+        elif step == 'code':
+            code = text
+            try:
+                await self.telethon_client.sign_in(phone=context.user_data['phone_number'], code=code)
+            except errors.SessionPasswordNeededError:
+                # Handle two-factor authentication if enabled
+                await update.message.reply_text("🔐 احراز هویت دو مرحله‌ای فعال است. لطفاً رمز عبور خود را وارد کنید:")
+                context.user_data['generate_ss_step'] = 'password'
+                return
+            except errors.PhoneCodeInvalidError:
+                await update.message.reply_text("❌ کد تایید نامعتبر است. لطفاً دوباره تلاش کنید:")
+                context.user_data['generate_ss_step'] = 'code'
+                return
+            except Exception as e:
+                logger.error(f"Telethon sign_in error: {e}")
+                await update.message.reply_text("❌ خطا در احراز هویت. لطفاً مجدداً تلاش کنید.")
+                context.user_data['generate_ss_step'] = None
+                await self.telethon_client.disconnect()
+                return
+
+            # If sign_in is successful
+            string_session = self.telethon_client.session.save()
+            config["telegram_string_session"] = string_session
+            save_config()
+            await update.message.reply_text("✅ **String Session با موفقیت تولید و تنظیم شد!**")
+            await self.telethon_client.disconnect()
+            context.user_data['generate_ss_step'] = None
+
+        elif step == 'password':
+            password = text
+            try:
+                await self.telethon_client.sign_in(password=password)
+            except errors.PasswordHashInvalidError:
+                await update.message.reply_text("❌ رمز عبور نامعتبر است. لطفاً دوباره تلاش کنید:")
+                context.user_data['generate_ss_step'] = 'password'
+                return
+            except Exception as e:
+                logger.error(f"Telethon sign_in password error: {e}")
+                await update.message.reply_text("❌ خطا در احراز هویت. لطفاً مجدداً تلاش کنید.")
+                context.user_data['generate_ss_step'] = None
+                await self.telethon_client.disconnect()
+                return
+
+            # If password sign_in is successful
+            string_session = self.telethon_client.session.save()
+            config["telegram_string_session"] = string_session
+            save_config()
+            await update.message.reply_text("✅ **String Session با موفقیت تولید و تنظیم شد!**")
+            await self.telethon_client.disconnect()
+            context.user_data['generate_ss_step'] = None
+
+        else:
+            await update.message.reply_text(
+                "❓ روند تنظیم String Session به درستی انجام نشده است. لطفاً دوباره تلاش کنید."
+            )
+            context.user_data['generate_ss_step'] = None
+            if hasattr(self, 'telethon_client'):
+                await self.telethon_client.disconnect()
 
     async def upload_csv_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
@@ -671,6 +814,11 @@ class TelegramBot:
         user_id = update.effective_user.id
         if not is_admin(user_id):
             await update.message.reply_text("❌ شما اجازه استفاده از این ربات را ندارید.")
+            return
+
+        # Check if the user is in the process of generating StringSession
+        if context.user_data.get('generate_ss_step'):
+            await self.handle_generate_string_session(update, context, update.message.text)
             return
 
         if update.message.document:
@@ -730,7 +878,8 @@ class TelegramBot:
                 try:
                     temp_file_path.unlink(missing_ok=True)
                     result_file.unlink(missing_ok=True)
-                    temp_dir.rmdir()
+                    if not any(temp_dir.iterdir()):
+                        temp_dir.rmdir()
                 except Exception as e:
                     logger.warning(f"Failed to clean up temporary files: {e}")
 
@@ -1039,6 +1188,11 @@ class TelegramBot:
             await update.message.reply_text("❌ شما اجازه استفاده از این ربات را ندارید.")
             return
 
+        # Check if the user is in the process of generating StringSession
+        if context.user_data.get('generate_ss_step'):
+            await self.handle_generate_string_session(update, context, update.message.text)
+            return
+
         setting = context.user_data.get('setting')
         state = context.user_data.get('state')
         text = update.message.text.strip()
@@ -1166,13 +1320,24 @@ class TelegramBot:
         ]
         return keyboard
 
-    def run(self):
+    async def run(self):
         """
-        Start the bot using polling.
+        Start the bot and set the webhook.
         """
         try:
-            logger.info("Starting the bot...")
-            self.application.run_polling()
+            await self.application.initialize()
+            await self.application.set_webhook(url=self.webhook_url)
+            logger.info(f"Webhook set to {self.webhook_url}")
+            await self.application.start()
+            logger.info("Bot started successfully.")
+            await self.application.updater.start_webhook(
+                listen=self.host,
+                port=self.port,
+                url_path=self.bot_token,
+                webhook_url=self.webhook_url
+            )
+            logger.info(f"Webhook listening on {self.host}:{self.port}")
+            await self.application.updater.idle()
         except Exception as e:
             logger.error(f"Failed to start the bot: {e}")
 
@@ -1204,7 +1369,7 @@ def main():
     """
     # Initialize and run the bot
     bot = TelegramBot(BOT_TOKEN, webhook_url=WEBHOOK_URL)
-    bot.run()
+    asyncio.run(bot.run())
 
 if __name__ == "__main__":
     try:
