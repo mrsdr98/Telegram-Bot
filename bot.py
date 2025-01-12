@@ -53,13 +53,15 @@ except json.JSONDecodeError:
 # End of Configuration
 # ==========================
 
-# Configure logging
-logging.basicConfig(
-    filename='bot.log',
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+# Configure logging with rotation to prevent log file from growing indefinitely
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+handler = logging.handlers.RotatingFileHandler(
+    'bot.log', maxBytes=5*1024*1024, backupCount=2, encoding='utf-8'
+)
+formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 # File to store blocked users and user sessions
 CONFIG_FILE = 'config.json'
@@ -355,9 +357,22 @@ class TelegramBot:
     The main Telegram Bot class handling all interactions and functionalities.
     """
 
-    # Define states for ConversationHandler
-    GENERATE_SS_API_ID, GENERATE_SS_API_HASH, GENERATE_SS_PHONE, GENERATE_SS_CODE, GENERATE_SS_PASSWORD = range(5)
-    SET_APIFY_TOKEN = range(5)  # Additional state for setting Apify API Token
+    # Define unique states for ConversationHandlers
+    # Generate String Session Conversation States
+    GENERATE_SS_API_ID = 1
+    GENERATE_SS_API_HASH = 2
+    GENERATE_SS_PHONE = 3
+    GENERATE_SS_CODE = 4
+    GENERATE_SS_PASSWORD = 5
+
+    # Set Apify Token Conversation States
+    SET_APIFY_TOKEN_STATE = 6
+
+    # Set Channel Username Conversation States
+    SET_CHANNEL_USERNAME_STATE = 7
+
+    # Block User Conversation States
+    BLOCK_USER_ID_STATE = 8
 
     def __init__(self, bot_token: str, webhook_url: str, host: str = "0.0.0.0", port: int = 8443):
         """
@@ -459,7 +474,7 @@ class TelegramBot:
 
         # -------- Conversation Handlers --------
         # Handler for generating StringSession
-        conv_handler = ConversationHandler(
+        conv_handler_generate_ss = ConversationHandler(
             entry_points=[CallbackQueryHandler(self.start_generate_string_session, pattern='generate_string_session')],
             states={
                 self.GENERATE_SS_API_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.generate_ss_api_id)],
@@ -471,22 +486,43 @@ class TelegramBot:
             fallbacks=[CommandHandler("cancel", self.cancel)],
             allow_reentry=True
         )
-        self.application.add_handler(conv_handler)
+        self.application.add_handler(conv_handler_generate_ss)
 
         # Handler for setting Apify API Token
-        apify_conv_handler = ConversationHandler(
+        conv_handler_set_apify = ConversationHandler(
             entry_points=[CallbackQueryHandler(self.start_set_apify_token, pattern='set_apify_token')],
             states={
-                self.SET_APIFY_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.set_apify_token)]
+                self.SET_APIFY_TOKEN_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.set_apify_token)]
             },
             fallbacks=[CommandHandler("cancel", self.cancel)],
             allow_reentry=True
         )
-        self.application.add_handler(apify_conv_handler)
+        self.application.add_handler(conv_handler_set_apify)
+
+        # Handler for setting Channel Username
+        conv_handler_set_channel = ConversationHandler(
+            entry_points=[CallbackQueryHandler(self.start_set_channel_username, pattern='set_channel_username')],
+            states={
+                self.SET_CHANNEL_USERNAME_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.set_channel_username)]
+            },
+            fallbacks=[CommandHandler("cancel", self.cancel)],
+            allow_reentry=True
+        )
+        self.application.add_handler(conv_handler_set_channel)
+
+        # Handler for blocking a user
+        conv_handler_block_user = ConversationHandler(
+            entry_points=[CallbackQueryHandler(self.block_user_prompt, pattern='block_user_prompt')],
+            states={
+                self.BLOCK_USER_ID_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.block_user_input_handler)]
+            },
+            fallbacks=[CommandHandler("cancel", self.cancel)],
+            allow_reentry=True
+        )
+        self.application.add_handler(conv_handler_block_user)
 
         # -------- Message Handlers --------
         self.application.add_handler(MessageHandler(filters.Document.ALL, self.upload_csv_handler))
-        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_messages))
 
         # -------- Error Handler --------
         self.application.add_error_handler(self.error_handler)
@@ -632,33 +668,33 @@ class TelegramBot:
             except ValueError:
                 await query.edit_message_text("❌ شناسه کاربری نامعتبر است.")
 
-        elif data == "block_user_prompt":
-            await self.block_user_prompt(update, context)
-
         elif data == "back_to_main":
             await self.start_command(update, context)
 
         # Settings Submenu
         elif data == "set_api_id":
-            await query.edit_message_text("🔧 لطفاً Telegram API ID را وارد کنید:")
-            context.user_data['setting'] = 'api_id'
+            await self.start_generate_string_session(update, context)
 
         elif data == "set_api_hash":
+            # Start setting API Hash
             await query.edit_message_text("🔧 لطفاً Telegram API Hash را وارد کنید:")
-            context.user_data['setting'] = 'api_hash'
+            return
 
         elif data == "set_string_session":
+            # Start setting String Session
             await query.edit_message_text("🔧 لطفاً Telegram String Session را وارد کنید:")
             context.user_data['setting'] = 'string_session'
+            return
 
         elif data == "set_apify_token":
+            # Start setting Apify Token
             await query.edit_message_text("🔧 لطفاً Apify API Token را وارد کنید:")
-            context.user_data['setting'] = 'apify_token'
             return  # Transition to Apify Token setting state
 
         elif data == "set_channel_username":
+            # Start setting Channel Username
             await query.edit_message_text("🔧 لطفاً نام کاربری کانال هدف را وارد کنید (با @ شروع کنید، مثلاً @yourchannelusername):")
-            context.user_data['setting'] = 'channel_username'
+            return  # Transition to Channel Username setting state
 
         # Export Data Handlers
         elif data == "export_registered_users":
@@ -682,10 +718,10 @@ class TelegramBot:
         await query.answer()
 
         keyboard = [
-            [InlineKeyboardButton("🔧 تنظیم Telegram API ID", callback_data="set_api_id")],
-            [InlineKeyboardButton("🔧 تنظیم Telegram API Hash", callback_data="set_api_hash")],
-            [InlineKeyboardButton("🔧 تنظیم Telegram String Session", callback_data="set_string_session")],
-            [InlineKeyboardButton("🔧 تنظیم Apify API Token", callback_data="set_apify_token")],
+            [InlineKeyboardButton("🔧 تنظیم Telegram API ID", callback_data="set_api_id"),
+             InlineKeyboardButton("🔧 تنظیم Telegram API Hash", callback_data="set_api_hash")],
+            [InlineKeyboardButton("🔧 تنظیم Telegram String Session", callback_data="set_string_session"),
+             InlineKeyboardButton("🔧 تنظیم Apify API Token", callback_data="set_apify_token")],
             [InlineKeyboardButton("🔧 تنظیم Target Channel Username", callback_data="set_channel_username")],
             [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_main")],
         ]
@@ -879,7 +915,7 @@ class TelegramBot:
             "لطفاً Apify API Token خود را وارد کنید:",
             parse_mode=ParseMode.MARKDOWN
         )
-        return self.SET_APIFY_TOKEN
+        return self.SET_APIFY_TOKEN_STATE
 
     async def set_apify_token(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
@@ -892,12 +928,12 @@ class TelegramBot:
         api_token = update.message.text.strip()
         if not api_token:
             await update.message.reply_text("❌ لطفاً یک Apify API Token معتبر وارد کنید:")
-            return self.SET_APIFY_TOKEN
+            return self.SET_APIFY_TOKEN_STATE
 
         # Basic validation (Apify tokens are typically long alphanumeric strings)
         if not isinstance(api_token, str) or len(api_token) < 20:
             await update.message.reply_text("❌ لطفاً یک Apify API Token معتبر وارد کنید:")
-            return self.SET_APIFY_TOKEN
+            return self.SET_APIFY_TOKEN_STATE
 
         config["apify_api_token"] = api_token
         save_config()
@@ -907,6 +943,45 @@ class TelegramBot:
         logger.info("TelegramChecker re-initialized with new Apify API Token.")
 
         await update.message.reply_text("✅ Apify API Token با موفقیت تنظیم شد.")
+        # Return to settings menu
+        await self.settings_menu(update, context)
+        return ConversationHandler.END
+
+    async def start_set_channel_username(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        Start the process to set Target Channel Username.
+
+        Args:
+            update (Update): Telegram update.
+            context (ContextTypes.DEFAULT_TYPE): Context for the update.
+        """
+        query = update.callback_query
+        await query.answer()
+        await query.edit_message_text(
+            "🔧 **تنظیم Target Channel Username**\n\n"
+            "لطفاً نام کاربری کانال هدف خود را وارد کنید (با @ شروع کنید، مثلاً @yourchannelusername):",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return self.SET_CHANNEL_USERNAME_STATE
+
+    async def set_channel_username(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        Handle setting the target channel username.
+
+        Args:
+            update (Update): Telegram update.
+            context (ContextTypes.DEFAULT_TYPE): Context for the update.
+        """
+        text = update.message.text.strip()
+        if not text.startswith("@"):
+            await update.message.reply_text("❌ لطفاً نام کاربری کانال را با @ شروع کنید (مثلاً @yourchannelusername):")
+            return self.SET_CHANNEL_USERNAME_STATE  # Reuse the same state
+
+        config["target_channel_username"] = text
+        save_config()
+        await update.message.reply_text("✅ نام کاربری کانال هدف با موفقیت تنظیم شد.")
+        # Reinitialize TelegramAdder with new channel
+        self.initialize_components()
         # Return to settings menu
         await self.settings_menu(update, context)
         return ConversationHandler.END
@@ -1124,8 +1199,40 @@ class TelegramBot:
         await query.edit_message_text(
             "➕ لطفاً شناسه کاربری تلگرام کاربری که می‌خواهید مسدود کنید را وارد کنید (عدد):"
         )
-        context.user_data['state'] = 'awaiting_block_user_id'
-        return ConversationHandler.END  # Ensure the conversation is handled correctly
+        return self.BLOCK_USER_ID_STATE
+
+    async def block_user_input_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        Handle input for blocking a new user.
+
+        Args:
+            update (Update): Telegram update.
+            context (ContextTypes.DEFAULT_TYPE): Context for the update.
+        """
+        user_id = update.effective_user.id
+        target_user_id_text = update.message.text.strip()
+        if not target_user_id_text.isdigit():
+            await update.message.reply_text(
+                "❌ لطفاً یک شناسه کاربری تلگرام معتبر (عدد) وارد کنید:"
+            )
+            return self.BLOCK_USER_ID_STATE
+
+        target_user_id = int(target_user_id_text)
+
+        if target_user_id in config.get("blocked_users", []):
+            await update.message.reply_text(
+                f"🔍 کاربر با شناسه {target_user_id} قبلاً مسدود شده است."
+            )
+        else:
+            config.setdefault("blocked_users", []).append(target_user_id)
+            save_config()
+            await update.message.reply_text(
+                f"✅ کاربر با شناسه {target_user_id} با موفقیت مسدود شد."
+            )
+
+        # Return to manage blocked menu
+        await self.manage_blocked_menu(update, context)
+        return ConversationHandler.END
 
     async def unblock_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_id: int):
         """
@@ -1267,8 +1374,6 @@ class TelegramBot:
             await update.message.reply_text("❌ شما اجازه استفاده از این ربات را ندارید.")
             return
 
-        # Check if the user is in the process of generating StringSession via ConversationHandler
-        # This is already handled by ConversationHandler, so no action is needed here
         # Other text messages can be handled as needed
         await update.message.reply_text(
             "❓ لطفاً از دکمه‌های ارائه شده استفاده کنید یا یک دستور معتبر ارسال کنید."
@@ -1300,11 +1405,15 @@ class TelegramBot:
         """
         keyboard = [
             [InlineKeyboardButton("⚙️ تنظیمات", callback_data="settings")],
-            [InlineKeyboardButton("📂 آپلود مخاطبین CSV", callback_data="upload_csv")],
-            [InlineKeyboardButton("➕ افزودن کاربران به کانال هدف", callback_data="add_to_channel")],
+            [
+                InlineKeyboardButton("📂 آپلود مخاطبین CSV", callback_data="upload_csv"),
+                InlineKeyboardButton("➕ افزودن کاربران به کانال هدف", callback_data="add_to_channel")
+            ],
             [InlineKeyboardButton("🛑 مدیریت کاربران مسدود شده", callback_data="manage_blocked")],
-            [InlineKeyboardButton("📤 صادرات داده‌ها", callback_data="export_data")],
-            [InlineKeyboardButton("❌ خروج کامل", callback_data="exit")],
+            [
+                InlineKeyboardButton("📤 صادرات داده‌ها", callback_data="export_data"),
+                InlineKeyboardButton("❌ خروج کامل", callback_data="exit")
+            ],
         ]
         return keyboard
 
@@ -1348,7 +1457,7 @@ class TelegramBot:
     # Additional Handlers
     # ========================
 
-    # (No additional handlers needed)
+    # No additional handlers needed beyond ConversationHandlers and existing methods.
 
 # ========================
 # Running the Bot
