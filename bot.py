@@ -357,6 +357,7 @@ class TelegramBot:
 
     # Define states for ConversationHandler
     GENERATE_SS_API_ID, GENERATE_SS_API_HASH, GENERATE_SS_PHONE, GENERATE_SS_CODE, GENERATE_SS_PASSWORD = range(5)
+    SET_APIFY_TOKEN = range(5)  # Additional state for setting Apify API Token
 
     def __init__(self, bot_token: str, webhook_url: str, host: str = "0.0.0.0", port: int = 8443):
         """
@@ -471,6 +472,17 @@ class TelegramBot:
             allow_reentry=True
         )
         self.application.add_handler(conv_handler)
+
+        # Handler for setting Apify API Token
+        apify_conv_handler = ConversationHandler(
+            entry_points=[CallbackQueryHandler(self.start_set_apify_token, pattern='set_apify_token')],
+            states={
+                self.SET_APIFY_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.set_apify_token)]
+            },
+            fallbacks=[CommandHandler("cancel", self.cancel)],
+            allow_reentry=True
+        )
+        self.application.add_handler(apify_conv_handler)
 
         # -------- Message Handlers --------
         self.application.add_handler(MessageHandler(filters.Document.ALL, self.upload_csv_handler))
@@ -642,6 +654,7 @@ class TelegramBot:
         elif data == "set_apify_token":
             await query.edit_message_text("🔧 لطفاً Apify API Token را وارد کنید:")
             context.user_data['setting'] = 'apify_token'
+            return  # Transition to Apify Token setting state
 
         elif data == "set_channel_username":
             await query.edit_message_text("🔧 لطفاً نام کاربری کانال هدف را وارد کنید (با @ شروع کنید، مثلاً @yourchannelusername):")
@@ -807,6 +820,8 @@ class TelegramBot:
         save_config()
         await update.message.reply_text("✅ **String Session با موفقیت تولید و تنظیم شد!**")
         await telethon_client.disconnect()
+        # Reinitialize TelegramAdder with new String Session
+        self.initialize_components()
         return ConversationHandler.END
 
     async def generate_ss_password(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -845,6 +860,55 @@ class TelegramBot:
         save_config()
         await update.message.reply_text("✅ **String Session با موفقیت تولید و تنظیم شد!**")
         await telethon_client.disconnect()
+        # Reinitialize TelegramAdder with new String Session
+        self.initialize_components()
+        return ConversationHandler.END
+
+    async def start_set_apify_token(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        Start the process to set Apify API Token.
+
+        Args:
+            update (Update): Telegram update.
+            context (ContextTypes.DEFAULT_TYPE): Context for the update.
+        """
+        query = update.callback_query
+        await query.answer()
+        await query.edit_message_text(
+            "🔧 **تنظیم Apify API Token**\n\n"
+            "لطفاً Apify API Token خود را وارد کنید:",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return self.SET_APIFY_TOKEN
+
+    async def set_apify_token(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        Handle Apify API Token input.
+
+        Args:
+            update (Update): Telegram update.
+            context (ContextTypes.DEFAULT_TYPE): Context for the update.
+        """
+        api_token = update.message.text.strip()
+        if not api_token:
+            await update.message.reply_text("❌ لطفاً یک Apify API Token معتبر وارد کنید:")
+            return self.SET_APIFY_TOKEN
+
+        # Basic validation (Apify tokens are typically long alphanumeric strings)
+        if not isinstance(api_token, str) or len(api_token) < 20:
+            await update.message.reply_text("❌ لطفاً یک Apify API Token معتبر وارد کنید:")
+            return self.SET_APIFY_TOKEN
+
+        config["apify_api_token"] = api_token
+        save_config()
+
+        # Initialize or reinitialize TelegramChecker
+        self.checker = TelegramChecker(api_token)
+        logger.info("TelegramChecker re-initialized with new Apify API Token.")
+
+        await update.message.reply_text("✅ Apify API Token با موفقیت تنظیم شد.")
+        # Return to settings menu
+        await self.settings_menu(update, context)
         return ConversationHandler.END
 
     async def upload_csv_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1061,39 +1125,7 @@ class TelegramBot:
             "➕ لطفاً شناسه کاربری تلگرام کاربری که می‌خواهید مسدود کنید را وارد کنید (عدد):"
         )
         context.user_data['state'] = 'awaiting_block_user_id'
-
-    async def block_user_input_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        Handle input for blocking a new user.
-
-        Args:
-            update (Update): Telegram update.
-            context (ContextTypes.DEFAULT_TYPE): Context for the update.
-        """
-        user_id = update.effective_user.id
-        target_user_id_text = update.message.text.strip()
-        if not target_user_id_text.isdigit():
-            await update.message.reply_text(
-                "❌ لطفاً یک شناسه کاربری تلگرام معتبر (عدد) وارد کنید:"
-            )
-            return
-
-        target_user_id = int(target_user_id_text)
-
-        if target_user_id in config.get("blocked_users", []):
-            await update.message.reply_text(
-                f"🔍 کاربر با شناسه {target_user_id} قبلاً مسدود شده است."
-            )
-        else:
-            config.setdefault("blocked_users", []).append(target_user_id)
-            save_config()
-            await update.message.reply_text(
-                f"✅ کاربر با شناسه {target_user_id} با موفقیت مسدود شد."
-            )
-
-        # Return to manage blocked menu
-        await self.manage_blocked_menu(update, context)
-        context.user_data['state'] = None
+        return ConversationHandler.END  # Ensure the conversation is handled correctly
 
     async def unblock_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_id: int):
         """
